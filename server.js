@@ -2,7 +2,7 @@ require('dotenv').config();
 
 // Importera nödvändiga paket
 const express = require('express');
-const mysql = require('mysql2/promise');
+const { Pool } = require('pg'); 
 const cors = require('cors');
 
 // Skapa en Express-applikation
@@ -14,23 +14,24 @@ app.use(cors());
 // Middleware för att hantera JSON-förfrågningar
 app.use(express.json());
 
-// Skapa en databasanslutning med hjälp av Connection Pool
-const pool = mysql.createPool({
+// Skapa en databasanslutning med PostgreSQL Pool
+const pool = new Pool({
+  user: process.env.DB_USERNAME, 
   host: process.env.DB_HOST,
-  user: process.env.DB_USER,
+  database: process.env.DB_DATABASE,
   password: process.env.DB_PASSWORD,
-  database: process.env.DB_NAME,
-  waitForConnections: true,
-  connectionLimit: 10,
-  queueLimit: 0
+  port: process.env.DB_PORT,
+  ssl: {
+    rejectUnauthorized: false
+  }
 });
 
-//----------------------- API-endpoints -----------------------
+
 
 // GET - Hämta all arbetslivserfarenhet
 app.get('/api/work', async (req, res) => {
   try {
-    const [rows] = await pool.query('SELECT * FROM workexperience');
+    const { rows } = await pool.query('SELECT * FROM workexperience');
     res.json(rows);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -47,18 +48,21 @@ app.post('/api/work', async (req, res) => {
   }
 
   try {
-    const [result] = await pool.query(
-      'INSERT INTO workexperience SET ?',
-      { 
+    const { rows } = await pool.query(
+      `INSERT INTO workexperience 
+      (companyname, jobtitle, location, startdate, enddate, description)
+      VALUES ($1, $2, $3, $4, $5, $6)
+      RETURNING id`,
+      [
         companyname,
         jobtitle,
         location,
         startdate,
-        enddate: req.body.enddate || null,
-        description: req.body.description || null
-      }
+        req.body.enddate || null,
+        req.body.description || null
+      ]
     );
-    res.status(201).json({ id: result.insertId, ...req.body });
+    res.status(201).json({ id: rows[0].id, ...req.body });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -71,17 +75,25 @@ app.put('/api/work/:id', async (req, res) => {
 
   try {
     // Kontrollera om posten finns
-    const [check] = await pool.query('SELECT * FROM workexperience WHERE id = ?', [id]);
-    if (check.length === 0) {
+    const check = await pool.query('SELECT * FROM workexperience WHERE id = $1', [id]);
+    if (check.rows.length === 0) {
       return res.status(404).json({ error: 'Posten finns inte' });
     }
 
-    // Uppdatera posten
-    const [result] = await pool.query(
-      'UPDATE workexperience SET ? WHERE id = ?',
-      [updates, id]
-    );
-    
+
+    const setClause = Object.keys(updates)
+      .map((key, index) => `${key} = $${index + 1}`)
+      .join(', ');
+
+    const values = Object.values(updates);
+    values.push(id);
+
+    const query = {
+      text: `UPDATE workexperience SET ${setClause} WHERE id = $${values.length}`,
+      values: values
+    };
+
+    await pool.query(query);
     res.json({ message: 'Uppdatering lyckades' });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -93,12 +105,12 @@ app.delete('/api/work/:id', async (req, res) => {
   const { id } = req.params;
 
   try {
-    const [result] = await pool.query(
-      'DELETE FROM workexperience WHERE id = ?',
+    const result = await pool.query(
+      'DELETE FROM workexperience WHERE id = $1',
       [id]
     );
     
-    if (result.affectedRows === 0) {
+    if (result.rowCount === 0) {
       return res.status(404).json({ error: 'Posten finns inte' });
     }
     
@@ -114,3 +126,19 @@ app.listen(port, () => {
   console.log(`Servern körs på port ${port}`);
   console.log(`Testlänk: http://localhost:${port}/api/work`);
 });
+// Test database connection on startup
+pool.connect((err, client, release) => {
+    if (err) {
+      console.error(' Database connection failed:', err);
+    } else {
+      console.log('Database connected successfully!');
+      client.query('SELECT NOW()', (err, result) => {
+        release();
+        if (err) {
+          console.error(' Database query failed:', err);
+        } else {
+          console.log(' Current database time:', result.rows[0].now);
+        }
+      });
+    }
+  });
